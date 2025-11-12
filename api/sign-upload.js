@@ -1,12 +1,12 @@
-// CommonJS version for Vercel Node functions + Cloudflare R2
+// CommonJS signer (R2 + Vercel)
 const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 const { randomUUID } = require("crypto");
 
 const s3 = new S3Client({
   region: process.env.AWS_REGION || "auto",
-  endpoint: process.env.S3_ENDPOINT, // e.g. https://<accountid>.r2.cloudflarestorage.com
-  forcePathStyle: true,              // IMPORTANT for Cloudflare R2
+  endpoint: process.env.S3_ENDPOINT,          // e.g. https://<accountid>.r2.cloudflarestorage.com
+  forcePathStyle: true,
   credentials: {
     accessKeyId: process.env.S3_ACCESS_KEY_ID,
     secretAccessKey: process.env.S3_SECRET_ACCESS_KEY
@@ -18,16 +18,12 @@ module.exports = async (req, res) => {
     if (req.method !== "POST") return res.status(405).end();
 
     const {
-      contentType = "audio/webm",
+      // we accept these but we won't bind ContentType in the signature
+      contentType = "application/octet-stream",
       ext = "webm",
       kind = "raw",
       userId = "anon"
     } = req.body || {};
-
-    if (!process.env.S3_BUCKET || !process.env.S3_ENDPOINT ||
-        !process.env.S3_ACCESS_KEY_ID || !process.env.S3_SECRET_ACCESS_KEY) {
-      return res.status(500).json({ error: "missing_env" });
-    }
 
     const id = randomUUID();
     const Key = `recordings/${userId}/${id}_${kind}.${ext}`;
@@ -35,7 +31,7 @@ module.exports = async (req, res) => {
     const cmd = new PutObjectCommand({
       Bucket: process.env.S3_BUCKET,
       Key,
-      ContentType: contentType,
+      // DO NOT include ContentType here; keep the signature header-less
       ServerSideEncryption: "AES256"
     });
 

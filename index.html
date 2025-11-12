@@ -465,9 +465,33 @@ async function testSignAndPut() {
 
 <button onclick="testSignOnly()" style="position:fixed;bottom:20px;left:20px;z-index:9999;">Test: Sign</button>
 <button onclick="testSignAndPut()" style="position:fixed;bottom:20px;left:120px;z-index:9999;">Test: Sign+PUT</button>
+<script>
+async function uploadToVault(blob, { kind = "raw", ext = "webm", userId = "hcsona" } = {}) {
+  const sign = await fetch("/api/sign-upload", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ contentType: blob.type, ext, kind, userId })
+  }).then(r => r.json());
+
+  const put = await fetch(sign.url, {
+    method: "PUT",
+    headers: { "Content-Type": blob.type },
+    body: blob
+  });
+  if (!put.ok) throw new Error("Upload failed");
+  console.log("✅ Uploaded:", sign.key);
+}
+
+// Example call after your recorder stops:
+mediaRec.onstop = async () => {
+  const blob = new Blob(chunks, { type: "audio/webm" });
+  await uploadToVault(blob, { kind: "raw", ext: "webm", userId: "hcsona" });
+};
+</script>
 
 </body>
 </html>
+
 
 
 

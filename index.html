@@ -436,8 +436,38 @@ async function debugSignAndPut() {
 
 <button onclick="debugSignOnly()" style="position:fixed;bottom:20px;left:20px;z-index:9999;">Debug: Sign</button>
 <button onclick="debugSignAndPut()" style="position:fixed;bottom:20px;left:120px;z-index:9999;">Debug: Sign+PUT</button>
+<script>
+async function testSignOnly() {
+  const r = await fetch("/api/sign-upload", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({ contentType: "text/plain", ext: "txt", kind: "test", userId: "hcsona" })
+  });
+  const data = await r.json();
+  alert("sign-upload status: " + r.status + "\n" + JSON.stringify(data, null, 2));
+}
+
+async function testSignAndPut() {
+  const signRes = await fetch("/api/sign-upload", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({ contentType: "text/plain", ext: "txt", kind: "test", userId: "hcsona" })
+  });
+  const { url, key } = await signRes.json();
+  const putRes = await fetch(url, {
+    method: "PUT",
+    headers: { "Content-Type": "text/plain" },
+    body: new Blob(["hello from HC Sona"], { type: "text/plain" })
+  });
+  alert("PUT status: " + putRes.status + "\nkey: " + key);
+}
+</script>
+
+<button onclick="testSignOnly()" style="position:fixed;bottom:20px;left:20px;z-index:9999;">Test: Sign</button>
+<button onclick="testSignAndPut()" style="position:fixed;bottom:20px;left:120px;z-index:9999;">Test: Sign+PUT</button>
 
 </body>
 </html>
+
 
 

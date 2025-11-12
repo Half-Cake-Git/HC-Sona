@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Record → Regenerate (Hold + Timer + Auto-Trim)</title>
+<title>HC Sona — Record → Regenerate (Hold + Timer + Auto-Trim + Upload)</title>
 <style>
   :root { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; }
   html,body { height:100%; margin:0; background:#0f1115; color:#eaeaea; }
@@ -34,8 +34,7 @@
   .accent  { background:#a78bfa; color:#1b0f28; }
   .ghost   { background:#1a1f2f; color:#eaeaea; border:1px dashed #2a3046; }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12px; opacity:.85; }
-
-  /* Added: fixed-position debug buttons */
+  /* Fixed-position debug buttons */
   .debug { position:fixed; left:16px; bottom:16px; display:flex; gap:8px; z-index:9999; }
 </style>
 </head>
@@ -43,7 +42,7 @@
 <div class="wrap">
   <div class="card">
     <h1>Record → Regenerate</h1>
-    <p><b>Hold</b> the red circle to record (timer shows live). Release to stop. We’ll <b>auto-trim silence</b>. Then tap <b>Regenerate</b> for a fresh variation. Use <b>Play Original</b> / <b>Play Variation</b> to listen.</p>
+    <p><b>Hold</b> the red circle to record (live timer). Release to stop. We’ll <b>auto-trim silence</b>. Tap <b>Regenerate</b> for a fresh variation. Use <b>Play Original</b> / <b>Play Variation</b> to listen. Upload happens automatically (private R2).</p>
 
     <div class="center">
       <button id="btnHold" class="record" aria-label="Hold to record">
@@ -64,50 +63,20 @@
   </div>
 </div>
 
+<!-- Debug helpers (remove after verification) -->
+<div class="debug">
+  <button class="ghost" onclick="testSign()">Test: Sign</button>
+  <button class="ghost" onclick="testSignPut()">Test: Sign+PUT</button>
+</div>
+
 <script>
-/* ===== Audio context / chain ===== */
+/* =================== Globals & UI =================== */
 let ctx, busL, busR, merger, early, dL, dR, eqLow, eqMid, eqHigh, comp;
-async function ensureAudio(){
-  if (!ctx){
-    ctx = new (window.AudioContext || window.webkitAudioContext)();
-    busL = ctx.createGain(); busR = ctx.createGain();
-    busL.gain.value = 0.9; busR.gain.value = 0.9;
-    merger = ctx.createChannelMerger(2); busL.connect(merger,0,0); busR.connect(merger,0,1);
-
-    // tiny room
-    dL = ctx.createDelay(1.0); dR = ctx.createDelay(1.0);
-    dL.delayTime.value = 0.023; dR.delayTime.value = 0.031;
-    const fbL=ctx.createGain(), fbR=ctx.createGain();
-    fbL.gain.value = 0.18; fbR.gain.value = 0.18;
-    dL.connect(fbL).connect(dR); dR.connect(fbR).connect(dL);
-    early = ctx.createGain(); early.gain.value = 0.12;
-    merger.connect(dL); merger.connect(dR); dL.connect(early); dR.connect(early);
-
-    // master polish
-    eqLow  = ctx.createBiquadFilter(); eqLow.type="lowshelf";  eqLow.frequency.value=120;  eqLow.gain.value=-1;
-    eqMid  = ctx.createBiquadFilter(); eqMid.type="peaking";   eqMid.frequency.value=1400; eqMid.Q.value=1; eqMid.gain.value=-1;
-    eqHigh = ctx.createBiquadFilter(); eqHigh.type="highshelf"; eqHigh.frequency.value=4800; eqHigh.gain.value=1;
-    comp   = ctx.createDynamicsCompressor();
-    comp.threshold.value=-12; comp.knee.value=18; comp.ratio.value=8; comp.attack.value=0.003; comp.release.value=0.15;
-
-    const master=ctx.createGain(); master.gain.value = 0.95;
-    const sum=ctx.createGain();
-    merger.connect(sum);
-    sum.connect(eqLow).connect(eqMid).connect(eqHigh);
-    eqHigh.connect(master);
-    early.connect(master);
-    master.connect(comp).connect(ctx.destination);
-  }
-  if (ctx.state === "suspended") await ctx.resume();
-}
-function panStereo(node){ const L=ctx.createGain(), R=ctx.createGain(); node.connect(L); node.connect(R); L.connect(busL); R.connect(busR); }
-
-/* ===== Recording (press & hold) + Timer ===== */
 let stream, mediaRec, chunks = [];
 let timerId = null, tStart = 0;
 
 let originalBuffer = null;          // trimmed
-let rawBuffer = null;               // untrimmed, for reference (not used in regen)
+let rawBuffer = null;               // untrimmed
 let lastVariationBuffer = null;
 
 const statusEl = document.getElementById('status');
@@ -135,84 +104,52 @@ function fmtTime(ms){
   const total = ms/1000;
   const m = Math.floor(total/60);
   const s = Math.floor(total%60);
-  const d = Math.floor((total - Math.floor(total)) * 10); // tenths
+  const d = Math.floor((total - Math.floor(total)) * 10);
   return `${m}:${String(s).padStart(2,'0')}.${d}`;
 }
 
-async function startRecording(){
-  await ensureAudio();
-  try{
-    if (!stream) {
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation:false, noiseSuppression:false, autoGainControl:false }
-      });
-    }
-    mediaRec = new MediaRecorder(stream);
-    chunks = [];
-    mediaRec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
-    mediaRec.onstop = async ()=>{
-      const blob = new Blob(chunks, { type: 'audio/webm' });
-      const arr = await blob.arrayBuffer();
-      try {
-        rawBuffer = await ctx.decodeAudioData(arr.slice(0));
-      } catch {
-        rawBuffer = null;
-      }
-      // Auto-trim silence → originalBuffer
-      if (rawBuffer){
-        originalBuffer = await trimSilence(rawBuffer, -48 /*dB*/, 1024 /*win*/);
-      } else {
-        originalBuffer = null;
-      }
-      const dur = originalBuffer ? originalBuffer.duration : 0;
-      setStatus(dur > 0 ? `Recorded ${dur.toFixed(2)}s (trimmed).` : 'Recorded (silence or decode issue). Try again closer to the mic.');
-    };
+/* =================== Audio master chain =================== */
+async function ensureAudio(){
+  if (!ctx){
+    ctx = new (window.AudioContext || window.webkitAudioContext)();
+    busL = ctx.createGain(); busR = ctx.createGain();
+    busL.gain.value = 0.9; busR.gain.value = 0.9;
+    merger = ctx.createChannelMerger(2); busL.connect(merger,0,0); busR.connect(merger,0,1);
 
-    mediaRec.start();
-    // timer on
-    tStart = performance.now();
-    timerText.textContent = '0:00.0';
-    timerId = setInterval(()=>{
-      const ms = performance.now() - tStart;
-      timerText.textContent = fmtTime(ms);
-    }, 100);
+    // tiny early reflections
+    dL = ctx.createDelay(1.0); dR = ctx.createDelay(1.0);
+    dL.delayTime.value = 0.023; dR.delayTime.value = 0.031;
+    const fbL=ctx.createGain(), fbR=ctx.createGain();
+    fbL.gain.value = 0.18; fbR.gain.value = 0.18;
+    dL.connect(fbL).connect(dR); dR.connect(fbR).connect(dL);
+    early = ctx.createGain(); early.gain.value = 0.12;
+    merger.connect(dL); merger.connect(dR); dL.connect(early); dR.connect(early);
 
-    setStatus('Recording… release to stop.');
-    setRecUI(true);
-  }catch(e){
-    console.error(e);
-    setStatus('Microphone permission denied or unavailable.');
+    // polish
+    eqLow  = ctx.createBiquadFilter(); eqLow.type="lowshelf";  eqLow.frequency.value=120;  eqLow.gain.value=-1;
+    eqMid  = ctx.createBiquadFilter(); eqMid.type="peaking";   eqMid.frequency.value=1400; eqMid.Q.value=1; eqMid.gain.value=-1;
+    eqHigh = ctx.createBiquadFilter(); eqHigh.type="highshelf"; eqHigh.frequency.value=4800; eqHigh.gain.value=1;
+    comp   = ctx.createDynamicsCompressor();
+    comp.threshold.value=-12; comp.knee.value=18; comp.ratio.value=8; comp.attack.value=0.003; comp.release.value=0.15;
+
+    const master=ctx.createGain(); master.gain.value = 0.95;
+    const sum=ctx.createGain();
+    merger.connect(sum);
+    sum.connect(eqLow).connect(eqMid).connect(eqHigh);
+    eqHigh.connect(master);
+    early.connect(master);
+    master.connect(comp).connect(ctx.destination);
   }
+  if (ctx.state === "suspended") await ctx.resume();
 }
-function stopRecording(){
-  if (timerId){ clearInterval(timerId); timerId = null; }
-  setRecUI(false);
-  if (mediaRec && mediaRec.state !== 'inactive') {
-    mediaRec.stop();
-    setStatus('Processing recording…');
-  }
-}
+function panStereo(node){ const L=ctx.createGain(), R=ctx.createGain(); node.connect(L); node.connect(R); L.connect(busL); R.connect(busR); }
 
-/* Press & hold listeners (pointer-safe) */
-let holding = false;
-function addHoldListeners(el){
-  const start = (e)=>{ e.preventDefault(); if (holding) return; holding=true; startRecording(); };
-  const end   = (e)=>{ if (!holding) return; holding=false; stopRecording(); };
-  el.addEventListener('pointerdown', start);
-  ['pointerup','pointercancel','pointerleave','pointerout'].forEach(ev=> el.addEventListener(ev, end));
-  window.addEventListener('blur', end);
-}
-addHoldListeners(btnHold);
-
-/* ===== Silence trim =====
-   Find start/end where windowed RMS rises above a threshold in dBFS.
-*/
+/* =================== Silence trim =================== */
 async function trimSilence(buffer, thresholdDb=-48, windowSize=1024){
   const sr = buffer.sampleRate;
   const chans = buffer.numberOfChannels;
   const len = buffer.length;
 
-  // Mixdown to mono for detection
   const mono = new Float32Array(len);
   for (let c=0; c<chans; c++){
     const ch = buffer.getChannelData(c);
@@ -220,8 +157,7 @@ async function trimSilence(buffer, thresholdDb=-48, windowSize=1024){
   }
 
   function rms(start, size){
-    let sum=0;
-    const end = Math.min(len, start+size);
+    let sum=0; const end = Math.min(len, start+size);
     for (let i=start; i<end; i++){ const x=mono[i]; sum += x*x; }
     const v = Math.sqrt(sum / (end - start || 1));
     const db = 20 * Math.log10(v || 1e-10);
@@ -230,21 +166,16 @@ async function trimSilence(buffer, thresholdDb=-48, windowSize=1024){
 
   const step = Math.floor(windowSize/2);
   let start = 0, end = len - 1;
-  // find start
+
   for (let i=0; i<len; i += step){
     if (rms(i, windowSize) > thresholdDb){ start = Math.max(0, i - step); break; }
   }
-  // find end
   for (let i=len-1; i>start; i -= step){
     if (rms(i - windowSize, windowSize) > thresholdDb){ end = Math.min(len-1, i + step); break; }
   }
-  if (end <= start) {
-    // nothing above threshold
-    return null;
-  }
+  if (end <= start) return null;
 
   const outLen = end - start + 1;
-  // Create trimmed buffer and copy
   const out = ctx.createBuffer(chans, outLen, sr);
   for (let c=0; c<chans; c++){
     const src = buffer.getChannelData(c);
@@ -254,7 +185,7 @@ async function trimSilence(buffer, thresholdDb=-48, windowSize=1024){
   return out;
 }
 
-/* ===== Playback helper ===== */
+/* =================== Playback helper =================== */
 function playBuffer(buf){
   if (!buf) return;
   const src = ctx.createBufferSource();
@@ -264,7 +195,7 @@ function playBuffer(buf){
   src.start();
 }
 
-/* ===== Regeneration (granular) ===== */
+/* =================== Variation (granular) =================== */
 function seededRNG(seed){ let s=seed>>>0; return ()=>{ s+=0x6D2B79F5; let t=s; t=Math.imul(t^(t>>>15), t|1); t^=t+Math.imul(t^(t>>>7),61|t); return ((t^(t>>>14))>>>0)/4294967296; }; }
 function srnd(r,a,b){ return a + r()*(b-a); }
 function newSeed(){ if (crypto?.getRandomValues){ const u=new Uint32Array(1); crypto.getRandomValues(u); return u[0]>>>0; } return (Date.now() ^ Math.floor(Math.random()*0xFFFFFFFF))>>>0; }
@@ -348,7 +279,87 @@ async function renderVariation(baseBuffer, seed = newSeed()) {
   return await offline.startRendering();
 }
 
-/* ===== UI actions ===== */
+/* =================== Recording (press & hold) =================== */
+async function startRecording(){
+  await ensureAudio();
+  try{
+    if (!stream) {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation:false, noiseSuppression:false, autoGainControl:false }
+      });
+    }
+    const preferred = [
+      "audio/webm;codecs=opus",
+      "audio/webm",
+      "audio/ogg;codecs=opus",
+      "audio/ogg"
+    ].find(t => window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t));
+    const opts = preferred ? { mimeType: preferred } : {};
+    mediaRec = new MediaRecorder(stream, opts);
+
+    chunks = [];
+    mediaRec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+
+    mediaRec.onstop = async ()=>{
+      try{
+        const type = mediaRec.mimeType || 'audio/webm';
+        const blob = new Blob(chunks, { type });
+
+        // Decode & auto-trim silence
+        const arr = await blob.arrayBuffer();
+        try { rawBuffer = await ctx.decodeAudioData(arr.slice(0)); } catch { rawBuffer = null; }
+        if (rawBuffer){ originalBuffer = await trimSilence(rawBuffer, -48, 1024); } else { originalBuffer = null; }
+
+        const dur = originalBuffer ? originalBuffer.duration : 0;
+        setStatus(dur > 0 ? `Recorded ${dur.toFixed(2)}s (trimmed). Uploading…` : 'Recorded (silence/low level). Uploading…');
+
+        // Upload raw blob to R2 (no headers on PUT)
+        await uploadToVault(blob, { kind: "raw", userId: "hcsona" });
+        setStatus('Uploaded. You can Regenerate or play.');
+      } catch (err) {
+        console.error(err);
+        alert("Upload error: " + (err.message || err));
+        setStatus("Upload error.");
+      } finally {
+        if (stream) stream.getTracks().forEach(t => t.stop());
+        stream = null; mediaRec = null; chunks = [];
+        // stop UI
+        if (timerId){ clearInterval(timerId); timerId=null; }
+        setRecUI(false);
+      }
+    };
+
+    mediaRec.start(); // default timeslice
+    // Timer/UI on
+    tStart = performance.now();
+    timerText.textContent = '0:00.0';
+    timerId = setInterval(()=>{ timerText.textContent = fmtTime(performance.now()-tStart); }, 100);
+    setStatus('Recording… release to stop.');
+    setRecUI(true);
+  }catch(e){
+    console.error(e);
+    setStatus('Microphone permission denied or unavailable.');
+  }
+}
+function stopRecording(){
+  if (mediaRec && mediaRec.state !== 'inactive') {
+    mediaRec.stop();
+    setStatus('Processing recording…');
+  }
+}
+
+/* Press & hold listeners (pointer-safe) */
+let holding = false;
+function addHoldListeners(el){
+  const start = (e)=>{ e.preventDefault(); if (holding) return; holding=true; startRecording(); };
+  const end   = ()=>{ if (!holding) return; holding=false; if (timerId){ clearInterval(timerId); timerId=null; } setRecUI(false); stopRecording(); };
+  el.addEventListener('pointerdown', start);
+  ['pointerup','pointercancel','pointerleave','pointerout'].forEach(ev=> el.addEventListener(ev, end));
+  window.addEventListener('blur', end);
+}
+addHoldListeners(btnHold);
+
+/* =================== UI Actions =================== */
 btnPlayOriginal.addEventListener('click', async ()=>{
   await ensureAudio();
   if (!originalBuffer) { setStatus('No recording yet. Hold the red circle.'); return; }
@@ -372,16 +383,27 @@ btnPlayVariation.addEventListener('click', async ()=>{
   playBuffer(lastVariationBuffer);
 });
 
-/* ===== Mobile tip ===== */
-// If first action is silent on mobile, tap once more (AudioContext resume).
-</script>
+/* =================== Sign + Upload (no PUT headers) =================== */
+async function uploadToVault(blob, { kind = "raw", ext, userId = "hcsona" } = {}) {
+  const inferredExt = ext || (blob.type.includes("ogg") ? "ogg" : blob.type.includes("wav") ? "wav" : "webm");
+  const ct = blob.type || "application/octet-stream";
 
-<!-- Added: Debug helpers (you can remove later) -->
-<div class="debug">
-  <button class="ghost" onclick="testSign()">Test: Sign</button>
-  <button class="ghost" onclick="testSignPut()">Test: Sign+PUT</button>
-</div>
-<script>
+  const signRes = await fetch("/api/sign-upload", {
+    method: "POST",
+    headers: { "Content-Type":"application/json" },
+    body: JSON.stringify({ contentType: ct, ext: inferredExt, kind, userId })
+  });
+  const data = await signRes.json().catch(() => ({}));
+  if (!signRes.ok || !data.url) throw new Error("sign failed: " + JSON.stringify(data));
+
+  // IMPORTANT: no headers on PUT (prevents preflight/CORS mismatch)
+  const putRes = await fetch(data.url, { method: "PUT", body: blob });
+  if (!putRes.ok) throw new Error("upload failed: " + (await putRes.text()).slice(0,200));
+
+  console.log("✅ Uploaded:", data.key);
+}
+
+/* =================== Debug helpers (remove later) =================== */
 async function testSign(){
   try{
     const r = await fetch("/api/sign-upload", {
@@ -393,7 +415,6 @@ async function testSign(){
     alert("Sign status: " + r.status + "\n" + JSON.stringify(j,null,2));
   } catch(e){ alert("Sign error: " + e.message); }
 }
-
 async function testSignPut(){
   try{
     const s = await fetch("/api/sign-upload", {
@@ -404,16 +425,11 @@ async function testSignPut(){
     const j = await s.json();
     if (!s.ok || !j.url) { alert("Sign failed: " + s.status + "\n" + JSON.stringify(j)); return; }
 
-    // ⬇️ No headers — let the browser set them
-    const p = await fetch(j.url, {
-      method:"PUT",
-      body: new Blob(["hello from HC Sona"], { type:"text/plain" })
-    });
-
+    // PUT with no headers
+    const p = await fetch(j.url, { method:"PUT", body: new Blob(["hello from HC Sona"], { type:"text/plain" }) });
     alert("PUT status: " + p.status + "\nkey: " + j.key);
   } catch(e){ alert("PUT error: " + e.message); }
 }
 </script>
 </body>
 </html>
-

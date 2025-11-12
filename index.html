@@ -402,19 +402,18 @@ async function testSignPut(){
       body: JSON.stringify({ contentType:"text/plain", ext:"txt", kind:"test", userId:"hcsona" })
     });
     const j = await s.json();
-    if (!s.ok || !j.url) {
-      alert("Sign failed: " + s.status + "\n" + JSON.stringify(j));
-      return;
-    }
-    // Keep PUT simple; the signed URL already includes what R2 expects
+    if (!s.ok || !j.url) { alert("Sign failed: " + s.status + "\n" + JSON.stringify(j)); return; }
+
+    // ⬇️ No headers — let the browser set them
     const p = await fetch(j.url, {
       method:"PUT",
-      headers: { "Content-Type": "text/plain" },
       body: new Blob(["hello from HC Sona"], { type:"text/plain" })
     });
+
     alert("PUT status: " + p.status + "\nkey: " + j.key);
   } catch(e){ alert("PUT error: " + e.message); }
 }
 </script>
 </body>
 </html>
+

@@ -395,6 +395,49 @@ mediaRec.onstop = async () => {
   await uploadToVault(blob, { kind: "raw", ext: "webm", userId: "hcsona" });
 };
 </script>
+<script>
+async function debugSignOnly() {
+  try {
+    const r = await fetch("/api/sign-upload", {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({ contentType: "text/plain", ext: "txt", kind: "test", userId: "hcsona" })
+    });
+    const data = await r.json();
+    console.log("sign-upload response:", r.status, data);
+    alert("sign-upload status: " + r.status);
+  } catch (e) {
+    console.error(e);
+    alert("sign-upload error: " + e.message);
+  }
+}
+
+async function debugSignAndPut() {
+  try {
+    const signRes = await fetch("/api/sign-upload", {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({ contentType: "text/plain", ext: "txt", kind: "test", userId: "hcsona" })
+    });
+    const { url, key } = await signRes.json();
+    const putRes = await fetch(url, {
+      method: "PUT",
+      headers: { "Content-Type": "text/plain" },
+      body: new Blob(["hello from HC Sona"], { type: "text/plain" })
+    });
+    console.log("PUT status:", putRes.status, "key:", key);
+    alert("PUT status: " + putRes.status + "\nkey: " + key);
+  } catch (e) {
+    console.error(e);
+    alert("PUT error: " + e.message);
+  }
+}
+</script>
+
+<button onclick="debugSignOnly()" style="position:fixed;bottom:20px;left:20px;z-index:9999;">Debug: Sign</button>
+<button onclick="debugSignAndPut()" style="position:fixed;bottom:20px;left:120px;z-index:9999;">Debug: Sign+PUT</button>
+
 </body>
 </html>
+
 

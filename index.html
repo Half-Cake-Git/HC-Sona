@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Record → Regenerate (Hold + Timer + Auto-Trim)</title>
+<style>
+  :root { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+  html,body { height:100%; margin:0; background:#0f1115; color:#eaeaea; }
+  .wrap { min-height:100%; display:grid; place-items:center; padding:24px; }
+  .card { width:min(900px,94vw); background:#141720; border:1px solid #23283a; border-radius:18px; padding:22px; box-shadow:0 10px 30px rgba(0,0,0,.35); }
+  h1 { margin:0 0 10px; font-size:clamp(20px,3vw,28px); }
+  p  { margin:0 0 16px; opacity:.85; }
+  .center { display:grid; place-items:center; gap:16px; margin:16px 0 18px; }
+  /* Big red circular record button */
+  .record {
+    width:min(38vmin,220px); height:min(38vmin,220px);
+    border-radius:50%; border:none; cursor:pointer;
+    background:#ef4444; color:#200606; font-weight:900;
+    font-size:clamp(16px, 4.2vmin, 22px);
+    box-shadow:0 14px 34px rgba(0,0,0,.40), inset 0 -8px 16px rgba(0,0,0,.28);
+    transition: transform .04s ease, filter .12s ease;
+    display:grid; place-items:center; text-align:center; line-height:1.15;
+  }
+  .record:active { transform: translateY(2px) scale(.99); filter:brightness(.98); }
+  .timer { font-variant-numeric: tabular-nums; font-weight:900; }
+  .hint  { opacity:.85; font-size:.9em; font-weight:700; }
+  .rec-dot { width:10px; height:10px; border-radius:50%; background:#ef4444; box-shadow:0 0 0 0 rgba(239,68,68,.7); }
+  .rec-on  { animation: pulse 1s infinite; }
+  @keyframes pulse { 0%{ box-shadow:0 0 0 0 rgba(239,68,68,.6);} 70%{ box-shadow:0 0 0 16px rgba(239,68,68,0);} 100%{ box-shadow:0 0 0 0 rgba(239,68,68,0);} }
+  .row { display:flex; flex-wrap:wrap; gap:10px; align-items:center; justify-content:center; }
+  button { cursor:pointer; border:0; border-radius:12px; padding:12px 16px; font-weight:800; }
+  .primary { background:#22c55e; color:#06100a; }
+  .accent  { background:#a78bfa; color:#1b0f28; }
+  .ghost   { background:#1a1f2f; color:#eaeaea; border:1px dashed #2a3046; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12px; opacity:.85; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <h1>Record → Regenerate</h1>
+    <p><b>Hold</b> the red circle to record (timer shows live). Release to stop. We’ll <b>auto-trim silence</b>. Then tap <b>Regenerate</b> for a fresh variation. Use <b>Play Original</b> / <b>Play Variation</b> to listen.</p>
+
+    <div class="center">
+      <button id="btnHold" class="record" aria-label="Hold to record">
+        <div class="hint" id="hintText">HOLD TO RECORD</div>
+        <div class="timer" id="timerText" style="display:none;">0:00.0</div>
+      </button>
+      <div class="row">
+        <span id="recDot" class="rec-dot" aria-hidden="true"></span>
+        <span id="status" class="mono">Ready.</span>
+      </div>
+    </div>
+
+    <div class="row">
+      <button id="btnPlayOriginal"   class="ghost">Play Original</button>
+      <button id="btnRegenerate"     class="primary">Regenerate</button>
+      <button id="btnPlayVariation"  class="accent">Play Variation</button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ===== Audio context / chain ===== */
+let ctx, busL, busR, merger, early, dL, dR, eqLow, eqMid, eqHigh, comp;
+async function ensureAudio(){
+  if (!ctx){
+    ctx = new (window.AudioContext || window.webkitAudioContext)();
+    busL = ctx.createGain(); busR = ctx.createGain();
+    busL.gain.value = 0.9; busR.gain.value = 0.9;
+    merger = ctx.createChannelMerger(2); busL.connect(merger,0,0); busR.connect(merger,0,1);
+
+    // tiny room
+    dL = ctx.createDelay(1.0); dR = ctx.createDelay(1.0);
+    dL.delayTime.value = 0.023; dR.delayTime.value = 0.031;
+    const fbL=ctx.createGain(), fbR=ctx.createGain();
+    fbL.gain.value = 0.18; fbR.gain.value = 0.18;
+    dL.connect(fbL).connect(dR); dR.connect(fbR).connect(dL);
+    early = ctx.createGain(); early.gain.value = 0.12;
+    merger.connect(dL); merger.connect(dR); dL.connect(early); dR.connect(early);
+
+    // master polish
+    eqLow  = ctx.createBiquadFilter(); eqLow.type="lowshelf";  eqLow.frequency.value=120;  eqLow.gain.value=-1;
+    eqMid  = ctx.createBiquadFilter(); eqMid.type="peaking";   eqMid.frequency.value=1400; eqMid.Q.value=1; eqMid.gain.value=-1;
+    eqHigh = ctx.createBiquadFilter(); eqHigh.type="highshelf"; eqHigh.frequency.value=4800; eqHigh.gain.value=1;
+    comp   = ctx.createDynamicsCompressor();
+    comp.threshold.value=-12; comp.knee.value=18; comp.ratio.value=8; comp.attack.value=0.003; comp.release.value=0.15;
+
+    const master=ctx.createGain(); master.gain.value = 0.95;
+    const sum=ctx.createGain();
+    merger.connect(sum);
+    sum.connect(eqLow).connect(eqMid).connect(eqHigh);
+    eqHigh.connect(master);
+    early.connect(master);
+    master.connect(comp).connect(ctx.destination);
+  }
+  if (ctx.state === "suspended") await ctx.resume();
+}
+function panStereo(node){ const L=ctx.createGain(), R=ctx.createGain(); node.connect(L); node.connect(R); L.connect(busL); R.connect(busR); }
+
+/* ===== Recording (press & hold) + Timer ===== */
+let stream, mediaRec, chunks = [];
+let timerId = null, tStart = 0;
+
+let originalBuffer = null;          // trimmed
+let rawBuffer = null;               // untrimmed, for reference (not used in regen)
+let lastVariationBuffer = null;
+
+const statusEl = document.getElementById('status');
+const recDot   = document.getElementById('recDot');
+const btnHold  = document.getElementById('btnHold');
+const hintText = document.getElementById('hintText');
+const timerText= document.getElementById('timerText');
+const btnPlayOriginal  = document.getElementById('btnPlayOriginal');
+const btnRegenerate    = document.getElementById('btnRegenerate');
+const btnPlayVariation = document.getElementById('btnPlayVariation');
+
+function setStatus(s){ statusEl.textContent = s; }
+function setRecUI(on){
+  if (on){
+    recDot.classList.add('rec-on');
+    hintText.style.display = 'none';
+    timerText.style.display = 'block';
+  } else {
+    recDot.classList.remove('rec-on');
+    hintText.style.display = 'block';
+    timerText.style.display = 'none';
+  }
+}
+function fmtTime(ms){
+  const total = ms/1000;
+  const m = Math.floor(total/60);
+  const s = Math.floor(total%60);
+  const d = Math.floor((total - Math.floor(total)) * 10); // tenths
+  return `${m}:${String(s).padStart(2,'0')}.${d}`;
+}
+
+async function startRecording(){
+  await ensureAudio();
+  try{
+    if (!stream) {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation:false, noiseSuppression:false, autoGainControl:false }
+      });
+    }
+    mediaRec = new MediaRecorder(stream);
+    chunks = [];
+    mediaRec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+    mediaRec.onstop = async ()=>{
+      const blob = new Blob(chunks, { type: 'audio/webm' });
+      const arr = await blob.arrayBuffer();
+      try {
+        rawBuffer = await ctx.decodeAudioData(arr.slice(0));
+      } catch {
+        rawBuffer = null;
+      }
+      // Auto-trim silence → originalBuffer
+      if (rawBuffer){
+        originalBuffer = await trimSilence(rawBuffer, -48 /*dB*/, 1024 /*win*/);
+      } else {
+        originalBuffer = null;
+      }
+      const dur = originalBuffer ? originalBuffer.duration : 0;
+      setStatus(dur > 0 ? `Recorded ${dur.toFixed(2)}s (trimmed).` : 'Recorded (silence or decode issue). Try again closer to the mic.');
+    };
+
+    mediaRec.start();
+    // timer on
+    tStart = performance.now();
+    timerText.textContent = '0:00.0';
+    timerId = setInterval(()=>{
+      const ms = performance.now() - tStart;
+      timerText.textContent = fmtTime(ms);
+    }, 100);
+
+    setStatus('Recording… release to stop.');
+    setRecUI(true);
+  }catch(e){
+    console.error(e);
+    setStatus('Microphone permission denied or unavailable.');
+  }
+}
+function stopRecording(){
+  if (timerId){ clearInterval(timerId); timerId = null; }
+  setRecUI(false);
+  if (mediaRec && mediaRec.state !== 'inactive') {
+    mediaRec.stop();
+    setStatus('Processing recording…');
+  }
+}
+
+/* Press & hold listeners (pointer-safe) */
+let holding = false;
+function addHoldListeners(el){
+  const start = (e)=>{ e.preventDefault(); if (holding) return; holding=true; startRecording(); };
+  const end   = (e)=>{ if (!holding) return; holding=false; stopRecording(); };
+  el.addEventListener('pointerdown', start);
+  ['pointerup','pointercancel','pointerleave','pointerout'].forEach(ev=> el.addEventListener(ev, end));
+  window.addEventListener('blur', end);
+}
+addHoldListeners(btnHold);
+
+/* ===== Silence trim =====
+   Find start/end where windowed RMS rises above a threshold in dBFS.
+*/
+async function trimSilence(buffer, thresholdDb=-48, windowSize=1024){
+  const sr = buffer.sampleRate;
+  const chans = buffer.numberOfChannels;
+  const len = buffer.length;
+
+  // Mixdown to mono for detection
+  const mono = new Float32Array(len);
+  for (let c=0; c<chans; c++){
+    const ch = buffer.getChannelData(c);
+    for (let i=0; i<len; i++) mono[i] += ch[i] / chans;
+  }
+
+  function rms(start, size){
+    let sum=0;
+    const end = Math.min(len, start+size);
+    for (let i=start; i<end; i++){ const x=mono[i]; sum += x*x; }
+    const v = Math.sqrt(sum / (end - start || 1));
+    const db = 20 * Math.log10(v || 1e-10);
+    return db;
+  }
+
+  const step = Math.floor(windowSize/2);
+  let start = 0, end = len - 1;
+  // find start
+  for (let i=0; i<len; i += step){
+    if (rms(i, windowSize) > thresholdDb){ start = Math.max(0, i - step); break; }
+  }
+  // find end
+  for (let i=len-1; i>start; i -= step){
+    if (rms(i - windowSize, windowSize) > thresholdDb){ end = Math.min(len-1, i + step); break; }
+  }
+  if (end <= start) {
+    // nothing above threshold
+    return null;
+  }
+
+  const outLen = end - start + 1;
+  // Create trimmed buffer and copy
+  const out = ctx.createBuffer(chans, outLen, sr);
+  for (let c=0; c<chans; c++){
+    const src = buffer.getChannelData(c);
+    const dst = out.getChannelData(c);
+    dst.set(src.subarray(start, end+1));
+  }
+  return out;
+}
+
+/* ===== Playback helper ===== */
+function playBuffer(buf){
+  if (!buf) return;
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  const g = ctx.createGain(); g.gain.value = 1.0;
+  src.connect(g); panStereo(g);
+  src.start();
+}
+
+/* ===== Regeneration (granular) ===== */
+function seededRNG(seed){ let s=seed>>>0; return ()=>{ s+=0x6D2B79F5; let t=s; t=Math.imul(t^(t>>>15), t|1); t^=t+Math.imul(t^(t>>>7),61|t); return ((t^(t>>>14))>>>0)/4294967296; }; }
+function srnd(r,a,b){ return a + r()*(b-a); }
+function newSeed(){ if (crypto?.getRandomValues){ const u=new Uint32Array(1); crypto.getRandomValues(u); return u[0]>>>0; } return (Date.now() ^ Math.floor(Math.random()*0xFFFFFFFF))>>>0; }
+
+async function renderVariation(baseBuffer, seed = newSeed()) {
+  const rate = ctx.sampleRate;
+  const r = seededRNG(seed);
+  const srcDur = baseBuffer.duration || 1.0;
+  const outDur = Math.min(6.0, Math.max(0.6, srnd(r, 0.9, 1.7) * srcDur));
+  const length = Math.ceil(outDur * rate);
+  const offline = new OfflineAudioContext(2, length, rate);
+
+  const outL = offline.createGain(), outR = offline.createGain();
+  outL.gain.value = 0.9; outR.gain.value = 0.9;
+  const merger = offline.createChannelMerger(2);
+  outL.connect(merger, 0, 0); outR.connect(merger, 0, 1);
+
+  function tinyIR(ms=60,taps=[0,7,12,20,33,47]){
+    const len=Math.floor((ms/1000)*offline.sampleRate), ir=offline.createBuffer(2,len,offline.sampleRate);
+    for(let ch=0; ch<2; ch++){
+      const d=ir.getChannelData(ch);
+      for(let i=0;i<len;i++) d[i]=(Math.random()*2-1)*0.0015;
+      taps.forEach((m,i)=>{ const idx=Math.min(len-1,Math.floor((m/1000)*offline.sampleRate));
+        d[idx]+= (ch? -1:1) * Math.pow(0.72,i+1) * (0.9+Math.random()*0.2);
+      });
+      const tau=len/3; for(let i=1;i<len;i++) d[i]*=Math.exp(-i/tau);
+    }
+    return ir;
+  }
+  const conv = offline.createConvolver(); conv.buffer = tinyIR(55 + Math.floor(r()*15));
+  const wet  = offline.createGain(); wet.gain.value = 0.12 + r()*0.08;
+
+  const eqLow  = offline.createBiquadFilter(); eqLow.type="lowshelf";  eqLow.frequency.value=140;  eqLow.gain.value = -0.8 + r()*1.6;
+  const eqMid  = offline.createBiquadFilter(); eqMid.type="peaking";   eqMid.frequency.value=1300; eqMid.Q.value = 1.0; eqMid.gain.value = -1 + r()*2.0;
+  const eqHigh = offline.createBiquadFilter(); eqHigh.type="highshelf";eqHigh.frequency.value=5200; eqHigh.gain.value = -0.5 + r()*2.2;
+
+  const sum = offline.createGain();
+  merger.connect(eqLow).connect(eqMid).connect(eqHigh).connect(sum);
+  const dryTap = offline.createGain(); dryTap.gain.value = 1.0;
+  sum.connect(dryTap); dryTap.connect(offline.destination);
+  sum.connect(conv); conv.connect(wet); wet.connect(offline.destination);
+
+  const grains = Math.floor(srnd(r, 60, 140));
+  const gMin = 0.040, gMax = 0.18;
+  const step = srnd(r, 0.015, 0.05);
+  const jitter = srnd(r, -0.012, 0.035);
+  const rateMin = srnd(r, 0.7, 0.9), rateMax = srnd(r, 1.05, 1.45);
+  const panWidth = srnd(r, 0.2, 0.95);
+  const startBias = r();
+
+  let t = 0;
+  for (let i=0; i<grains; i++){
+    const src = offline.createBufferSource();
+    src.buffer = baseBuffer;
+    src.playbackRate.value = srnd(r, rateMin, rateMax);
+
+    const gDur = srnd(r, gMin, gMax);
+    const maxStart = Math.max(0, srcDur - gDur*1.2);
+    let startPos = Math.min(maxStart, Math.max(0, (startBias*srcDur) + srnd(r, -0.35, 0.35)*srcDur));
+    startPos = Math.max(0, Math.min(maxStart, startPos + srnd(r, -0.08, 0.08)));
+
+    const gGainL = offline.createGain(), gGainR = offline.createGain();
+    const envLen = gDur * offline.sampleRate;
+    const curve = new Float32Array(Math.max(2, Math.floor(envLen)));
+    for (let k=0; k<curve.length; k++){ const x = k/(curve.length-1); curve[k] = Math.sin(Math.PI * x) ** 1.5; }
+    gGainL.gain.setValueCurveAtTime(curve, t, gDur);
+    gGainR.gain.setValueCurveAtTime(curve, t, gDur);
+
+    const pan = (Math.random()*2-1) * panWidth;
+    const gOutL = offline.createGain(), gOutR = offline.createGain();
+    gOutL.gain.value = (1 - pan) * 0.5; gOutR.gain.value = (1 + pan) * 0.5;
+
+    src.connect(gGainL).connect(gOutL).connect(outL);
+    src.connect(gGainR).connect(gOutR).connect(outR);
+    try { src.start(t, startPos, gDur*1.1); } catch {}
+
+    t += Math.max(0.002, step + (Math.random()*2-1) * Math.abs(jitter));
+    if (t > outDur) break;
+  }
+
+  return await offline.startRendering();
+}
+
+/* ===== UI actions ===== */
+btnPlayOriginal.addEventListener('click', async ()=>{
+  await ensureAudio();
+  if (!originalBuffer) { setStatus('No recording yet. Hold the red circle.'); return; }
+  playBuffer(originalBuffer);
+});
+btnRegenerate.addEventListener('click', async ()=>{
+  await ensureAudio();
+  if (!originalBuffer) { setStatus('Record something first.'); return; }
+  setStatus('Generating variation…');
+  try{
+    lastVariationBuffer = await renderVariation(originalBuffer);
+    setStatus(`Variation ready (${lastVariationBuffer.duration.toFixed(2)}s).`);
+  }catch(e){
+    console.error(e);
+    setStatus('Generation failed. Try again.');
+  }
+});
+btnPlayVariation.addEventListener('click', async ()=>{
+  await ensureAudio();
+  if (!lastVariationBuffer) { setStatus('No variation yet. Tap Regenerate.'); return; }
+  playBuffer(lastVariationBuffer);
+});
+
+/* ===== Mobile tip ===== */
+// If first action is silent on mobile, tap once more (AudioContext resume).
+</script>
+</body>
+</html>

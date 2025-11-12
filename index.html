@@ -34,6 +34,9 @@
   .accent  { background:#a78bfa; color:#1b0f28; }
   .ghost   { background:#1a1f2f; color:#eaeaea; border:1px dashed #2a3046; }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12px; opacity:.85; }
+
+  /* Added: fixed-position debug buttons */
+  .debug { position:fixed; left:16px; bottom:16px; display:flex; gap:8px; z-index:9999; }
 </style>
 </head>
 <body>
@@ -371,6 +374,47 @@ btnPlayVariation.addEventListener('click', async ()=>{
 
 /* ===== Mobile tip ===== */
 // If first action is silent on mobile, tap once more (AudioContext resume).
+</script>
+
+<!-- Added: Debug helpers (you can remove later) -->
+<div class="debug">
+  <button class="ghost" onclick="testSign()">Test: Sign</button>
+  <button class="ghost" onclick="testSignPut()">Test: Sign+PUT</button>
+</div>
+<script>
+async function testSign(){
+  try{
+    const r = await fetch("/api/sign-upload", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ contentType:"text/plain", ext:"txt", kind:"test", userId:"hcsona" })
+    });
+    const j = await r.json();
+    alert("Sign status: " + r.status + "\n" + JSON.stringify(j,null,2));
+  } catch(e){ alert("Sign error: " + e.message); }
+}
+
+async function testSignPut(){
+  try{
+    const s = await fetch("/api/sign-upload", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ contentType:"text/plain", ext:"txt", kind:"test", userId:"hcsona" })
+    });
+    const j = await s.json();
+    if (!s.ok || !j.url) {
+      alert("Sign failed: " + s.status + "\n" + JSON.stringify(j));
+      return;
+    }
+    // Keep PUT simple; the signed URL already includes what R2 expects
+    const p = await fetch(j.url, {
+      method:"PUT",
+      headers: { "Content-Type": "text/plain" },
+      body: new Blob(["hello from HC Sona"], { type:"text/plain" })
+    });
+    alert("PUT status: " + p.status + "\nkey: " + j.key);
+  } catch(e){ alert("PUT error: " + e.message); }
+}
 </script>
 </body>
 </html>
